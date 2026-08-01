@@ -1,0 +1,7 @@
+name = "github-release-atom"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+
+# workers.dev 子域名（部署后可替换为自定义域名）。
+# 免费版每天 10 万次请求，足够个人订阅使用。
+workers_dev = true

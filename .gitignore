@@ -1,0 +1,9 @@
+# 生成的示例 feed（不入库）
+test/sample.atom
+
+# 依赖
+node_modules/
+
+# 日志
+*.log
+.wrangler/
