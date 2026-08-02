@@ -1,22 +1,24 @@
 /**
  * github-release-atom — Cloudflare Worker
  *
- * 从 GitHub Releases API 拉取仓库发行版本，精确过滤掉 prerelease 与 draft，
- * 输出标准 Atom 1.0 feed，供任意 RSS/Atom 阅读器订阅（Feedbro、TTRSS、NetNewsWire 等）。
+ * 订阅 GitHub 仓库的 Release，精确过滤掉 prerelease/draft，输出标准 Atom feed。
  *
- * 用法（订阅 URL）：
- *   https://<worker>.workers.dev/?repo=Scighost/Starward
- *   https://<worker>.workers.dev/?repo=Scighost/Starward&repo=other/repo   # 多仓库合成一个 feed
+ * 设计要点（重要）：
+ *  - 正文直接使用 GitHub 官方 releases.atom 里「已渲染好的完整 HTML」，
+ *    因此图片、链接、排版和官方源完全一致，不会丢内容。
+ *  - prerelease/draft 过滤无法靠官方 atom 判断，因此同时调用 REST API
+ *    /repos/{owner}/{repo}/releases 拿到 tag_name 的 prerelease/draft 标记，
+ *    用 tag 名把两者对应上，过滤掉预发布。
  *
- * 可选参数：
- *   pre=1    同时输出 prerelease（默认关闭，便于对照验证过滤效果）
- *   per=<n>  每个仓库最多取多少条（默认 20，最大 50）
+ * 用法：
+ *   /?repo=owner/repo
+ *   /?repo=a/b&repo=c/d            多仓库合成一个 feed
+ * 可选：pre=1 同时包含 prerelease（对照用）；per=<n> 每仓最多条数（默认20，最大50）
  */
 
 const GITHUB_API = 'https://api.github.com';
 const DEFAULT_PER = 20;
 const MAX_PER = 50;
-// GitHub 未认证限流 60 req/h/IP；用 CF Cache 缓存 feed，锁定 Cache-Control 周期内命中缓存、不进 API。
 const CACHE_TTL_SEC = 5 * 60;
 
 function esc(str) {
@@ -34,37 +36,109 @@ function rfc3339(iso) {
   return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
 }
 
-// GitHub release body 是 Markdown 文本；转成 <pre> 保留原文可读，且无需 markdown 渲染依赖。
-// 关键：只做一次 XML 转义，避免双重转义。
-function mdToHtml(md) {
-  const raw = String(md || '');
-  const cleaned = raw
-    .split(/\n/)
-    .map((l) => l.replace(/^\s*/, ''))
-    .filter(Boolean)
-    .join('\n');
-  return `<pre style="white-space:pre-wrap;font-family:inherit">${esc(cleaned)}</pre>`;
+/** 从官方 releases.atom 的 XML 里解析 entry 数组 */
+function parseOfficialAtom(xml) {
+  const entries = [];
+  const entryRe = /<entry>([\s\S]*?)<\/entry>/g;
+  let m;
+  while ((m = entryRe.exec(xml))) {
+    const body = m[1];
+    const id = /<id[^>]*>([\s\S]*?)<\/id>/.exec(body);
+    const title = /<title[^>]*>([\s\S]*?)<\/title>/.exec(body);
+    const updated = /<updated[^>]*>([\s\S]*?)<\/updated>/.exec(body);
+    const link = /<link[^>]*href="([^"]*)"[^>]*rel="alternate"[^>]*>/.exec(body) || /<link[^>]*rel="alternate"[^>]*href="([^"]*)"[^>]*>/.exec(body);
+    const content = /<content[^>]*type="html"[^>]*>([\s\S]*?)<\/content>/.exec(body);
+    // entry 里可能带有嵌套的 content（Atom 允许）。取完整 content 原文。
+    const author = /<author>\s*<name>([\s\S]*?)<\/name>/.exec(body);
+    entries.push({
+      id: id ? id[1].trim() : '',
+      title: title ? unescapeXml(title[1]) : '',
+      updated: updated ? updated[1].trim() : '',
+      link: link ? unescapeXml(link[1]) : '',
+      contentHtml: content ? content[1] : '',
+      author: author ? author[1].trim() : '',
+    });
+  }
+  return entries;
 }
 
-function buildAtom(feedTitleTxt, feedId, feedLink, releases) {
-  const updated = releases.length ? rfc3339(releases[0].published_at) : new Date().toISOString();
+function unescapeXml(s) {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
 
-  const entries = releases
-    .map((r) => {
-      const title = r.name || r.tag_name;
-      const id = `tag:github.com,2008:release/${r.id}`;
-      const ts = rfc3339(r.published_at);
-      const link = r.html_url;
-      const content = mdToHtml(r.body);
-      const author = r.author ? r.author.login : '';
+/** 从 release tag 链接或 atom id 里提取 tag 名 */
+function tagFromEntry(e) {
+  const m = /releases\/tag\/([^\/?#]+)/.exec(e.link);
+  if (m) return decodeURIComponent(m[1]);
+  // id 形如 tag:github.com,2008:Repository/123456/0.18.0
+  const im = /\/[^\/]+\/([^\/]+)$/.exec(e.id);
+  return im ? im[1] : '';
+}
+
+/** 拉取官方 releases.atom */
+async function fetchOfficialAtom(repo, token) {
+  const url = `https://github.com/${repo}/releases.atom`;
+  const headers = { 'User-Agent': 'github-release-atom-worker' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const resp = await fetch(url, { headers, signal: ctrl.signal });
+    if (!resp.ok) throw new Error(`官方 Atom 返回 ${resp.status} (${repo})`);
+    return await resp.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 拉取 REST API 拿到 tag -> prerelease/draft 映射（一路翻页） */
+async function fetchPrereleaseMap(repo, token) {
+  const ret = new Map();
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'github-release-atom-worker',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  for (let page = 1; page <= 3; page++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      const resp = await fetch(`${GITHUB_API}/repos/${repo}/releases?per_page=100&page=${page}`, {
+        headers,
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) throw new Error(`GitHub API ${resp.status} (${repo})`);
+      const batch = await resp.json();
+      if (!Array.isArray(batch)) break;
+      for (const r of batch) ret.set(r.tag_name, { prerelease: !!r.prerelease, draft: !!r.draft });
+      if (batch.length < 100) break;
+      const link = resp.headers.get('link') || '';
+      if (!link.includes('rel="next"')) break;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return ret;
+}
+
+function buildAtom(feedTitleTxt, feedId, feedLink, entries) {
+  const updated = entries.length ? entries[0].updated : new Date().toISOString();
+  const body = entries
+    .map((e) => {
       return `  <entry>
-    <title>${esc(title)}</title>
-    <id>${id}</id>
-    <updated>${ts}</updated>
-    <published>${ts}</published>
-    <link rel="alternate" type="text/html" href="${esc(link)}"/>
-    <content type="xshtml"><div xmlns="http://www.w3.org/1999/xhtml">${content}</div></content>
-    <author><name>${esc(author)}</name></author>
+    <title>${esc(e.title)}</title>
+    <id>${esc(e.id)}</id>
+    <updated>${rfc3339(e.updated)}</updated>
+    <published>${rfc3339(e.updated)}</published>
+    <link rel="alternate" type="text/html" href="${esc(e.link)}"/>
+    <content type="html">${e.contentHtml}</content>
+    <author><name>${esc(e.author)}</name></author>
   </entry>`;
     })
     .join('\n');
@@ -75,33 +149,9 @@ function buildAtom(feedTitleTxt, feedId, feedLink, releases) {
   <id>${esc(feedId)}</id>
   <updated>${updated}</updated>
   <link rel="self" type="application/atom+xml" href="${esc(feedLink)}"/>
-${entries}
+${body}
 </feed>
 `;
-}
-
-async function fetchLatestReleases(repo, per, includePrerelease, token) {
-  const origin = `${GITHUB_API}/repos/${repo}/releases?per_page=100`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
-  try {
-    const resp = await fetch(origin, {
-      signal: controller.signal,
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'github-release-atom-worker',
-        // 可选：设置环境变量 GITHUB_TOKEN（wrangler secret put GITHUB_TOKEN）可把限流提升到 5000 req/h。
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-    });
-    if (!resp.ok) throw new Error(`GitHub API 返回 ${resp.status} (${repo})`);
-    const all = await resp.json();
-    if (!Array.isArray(all)) throw new Error(`GitHub API 响应异常 (${repo})`);
-    const filtered = includePrerelease ? all : all.filter((r) => !r.prerelease && !r.draft);
-    return filtered.slice(0, per);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 async function handleRequest(request, env) {
@@ -110,22 +160,19 @@ async function handleRequest(request, env) {
   const includePre = url.searchParams.get('pre') === '1';
   const perRaw = parseInt(url.searchParams.get('per') || '', 10);
   const per = Number.isFinite(perRaw) ? Math.min(Math.max(perRaw, 1), MAX_PER) : DEFAULT_PER;
+  const token = env?.GITHUB_TOKEN;
 
   if (repos.length === 0) {
     return new Response(
       'github-release-atom worker 运行中。\n\n订阅请在 URL 上用 ?repo=owner/repo 指定仓库，例如：\n' +
         '  /?repo=Scighost/Starward\n' +
         '多仓库用多个 &repo= 叠加。加 pre=1 可临时包含 prerelease 用于对照。\n',
-      {
-        status: 200,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      },
+      { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
     );
   }
 
   const cacheKey = new Request(url.href, { method: 'GET' });
   const cache = caches.default;
-
   const cached = await cache.match(cacheKey);
   if (cached) {
     return new Response(cached.body, {
@@ -140,18 +187,28 @@ async function handleRequest(request, env) {
 
   let feed;
   try {
-    const all = [];
+    const merged = [];
     for (const repo of repos) {
-      const rels = await fetchLatestReleases(repo, per, includePre, env?.GITHUB_TOKEN);
-      all.push(...rels);
+      const [atomXml, preMap] = await Promise.all([
+        fetchOfficialAtom(repo, token),
+        fetchPrereleaseMap(repo, token),
+      ]);
+      let entries = parseOfficialAtom(atomXml);
+      if (!includePre) {
+        entries = entries.filter((e) => {
+          const st = preMap.get(tagFromEntry(e)) || {};
+          return !st.prerelease && !st.draft;
+        });
+      }
+      merged.push(...entries.slice(0, per));
     }
-    // 多仓库按发布时间汇总，新→旧
-    all.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+    // 多仓库按 updated 汇总排序
+    merged.sort((a, b) => new Date(b.updated) - new Date(a.updated));
     const cap = per * Math.max(repos.length, 1);
     const feedTitle = `${repos.join(', ')} — Releases${includePre ? '' : ' (stable)'}`;
     const feedId = `tag:github.com,2008:releases/${repos.join('+')}/${includePre ? 'all' : 'stable'}`;
     const feedLink = url.origin + url.pathname + url.search;
-    feed = buildAtom(feedTitle, feedId, feedLink, all.slice(0, cap));
+    feed = buildAtom(feedTitle, feedId, feedLink, merged.slice(0, cap));
   } catch (e) {
     return new Response(`生成失败：${esc(e.message)}`, {
       status: 502,
@@ -186,5 +243,5 @@ if (typeof addEventListener !== 'undefined') {
 
 // 供本地单元测试复用内部纯函数；同一份源码两种运行方式。
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, rfc3339, mdToHtml, buildAtom };
+  module.exports = { esc, rfc3339, buildAtom, parseOfficialAtom, tagFromEntry, unescapeXml };
 }
