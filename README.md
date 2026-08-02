@@ -1,7 +1,25 @@
 # GitHub Release → Atom（过滤 prerelease）
 
-把 GitHub 仓库的 **Releases** 拉下来，用 REST API 的 `prerelease` 字段精确过滤掉预发布版，
+把 GitHub 仓库的 **Releases** 拉下来，精确过滤掉 prerelease（预发布）和 draft（草稿），
 生成一个 **标准 Atom feed**，供任意 RSS/Atom 阅读器订阅（Feedbro、Tiny Tiny RSS、NetNewsWire 等均可）。
+
+> ✅ **已线上部署**（Cloudflare Workers），可直接订阅。
+
+## 订阅地址（直接可用）
+
+```
+https://github-release-atom.devil233.workers.dev
+```
+
+多仓库合成一个 feed（追加 `&repo=` 即可）：
+
+```
+https://github-release-atom.devil233.workers.dev/?repo=Scighost/Starward&repo=其他作者/其他仓库
+```
+
+- 默认过滤 prerelease + draft，只留正式版
+- 加 `&pre=1` 可临时查看包含预发布的版本（对照用）
+- 源码仓库：<https://github.com/devil233-ui/github-release-atom>
 
 ## 为什么需要它
 
@@ -17,6 +35,7 @@ GitHub 官方的 `releases.atom` 源**没有** `prerelease` 标记字段，阅�
 - 支持一个或多个仓库，各自生成独立 feed（也可合成一个）
 - **精确**过滤 prerelease（依据 API 字段，而非 tag 命名猜测）
 - 同时排除 `draft` 草稿（未发布版本）
+- **正文取自 GitHub 官方 `releases.atom`**，是已渲染好的完整 HTML —— 图片、链接、排版和官方源完全一致，不会丢失内容
 - 输出**标准 Atom 1.0**（`application/atom+xml`），不绑定任何阅读器
 - 零成本跑在 Cloudflare Workers 免费额度上，URL 永久可用、无需本地常开
 
