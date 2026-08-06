@@ -196,7 +196,10 @@ async function handleRequest(request, env) {
       let entries = parseOfficialAtom(atomXml);
       if (!includePre) {
         entries = entries.filter((e) => {
-          const st = preMap.get(tagFromEntry(e)) || {};
+          const st = preMap.get(tagFromEntry(e));
+          // tag 不在 REST 映射里 = 纯 tag 无 release（如 0.18.1）→ 丢弃；
+          // 有 release 但标记为 prerelease/draft → 丢弃。
+          if (!st) return false;
           return !st.prerelease && !st.draft;
         });
       }

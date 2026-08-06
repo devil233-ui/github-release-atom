@@ -29,6 +29,14 @@ const officialSample = `<?xml version="1.0" encoding="UTF-8"?>
     <content type="html">&lt;p&gt;预览版内容&lt;/p&gt;</content>
     <author><name>dev</name></author>
   </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/123/0.99.0</id>
+    <updated>2026-08-10T00:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/x/y/releases/tag/0.99.0"/>
+    <title>0.99.0</title>
+    <content type="html">&lt;p&gt;0.99.0&lt;/p&gt;</content>
+    <author><name>dev</name></author>
+  </entry>
 </feed>
 `;
 
@@ -45,7 +53,7 @@ function assert(name, cond) {
 
 console.log('■ 解析官方 Atom');
 const entries = parseOfficialAtom(officialSample);
-assert('解析出 2 条 entry', entries.length === 2);
+assert('解析出 3 条 entry', entries.length === 3);
 assert('首条 title 正确解码', entries[0].title === '0.18.0 - Dreamland');
 // content 在 XML 中是转义的（&lt;img...），代表 HTML 内容；未解码字符串应含 img/a 标记
 assert('首条保留 HTML 图片(img)', entries[0].contentHtml.includes('img'));
@@ -64,12 +72,16 @@ console.log('■ 过滤（结合 prerelease 映射）');
 const preMap = new Map([
   ['0.18.0', { prerelease: false, draft: false }],
   ['0.17.0-preview.2', { prerelease: true, draft: false }],
+  // 0.99.0 故意不在映射里 = 纯 tag 无 release
 ]);
+// 与 worker 修复后逻辑保持一致：查不到映射 → 丢弃
 const stable = entries.filter((e) => {
-  const st = preMap.get(tagFromEntry(e)) || {};
+  const st = preMap.get(tagFromEntry(e));
+  if (!st) return false;
   return !st.prerelease && !st.draft;
 });
 assert('过滤掉 preview', stable.length === 1 && stable[0].title === '0.18.0 - Dreamland');
+assert('纯 tag 无 release 被过滤(0.99.0)', !stable.some((e) => tagFromEntry(e) === '0.99.0'));
 
 console.log('■ buildAtom 保留全 HTML');
 const atom = buildAtom('X/Y — Releases (stable)', 'tag:t', 'https://x/feed', stable);
