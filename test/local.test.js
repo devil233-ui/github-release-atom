@@ -3,8 +3,7 @@
  * 用真实的 GitHub 官方 releases.atom 片段，确保不捏造结构。
  * 运行：node test/local.test.js
  */
-const fs = require('fs');
-const { parseOfficialAtom, tagFromEntry, unescapeXml, buildAtom } = require('../src/worker.js');
+import { parseOfficialAtom, tagFromEntry, unescapeXml, buildAtom } from '../src/worker.js';
 
 // 模拟一段官方 releases.atom（结构与 GitHub 完全一致，但去掉了长正文）
 const officialSample = `<?xml version="1.0" encoding="UTF-8"?>

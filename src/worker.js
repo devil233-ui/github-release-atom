@@ -217,7 +217,11 @@ async function handleRequest(request, env) {
   } catch (e) {
     return new Response(`生成失败：${esc(e.message)}`, {
       status: 502,
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        // 失败响应绝不缓存，否则一次限流会把错误页粘住直到 TTL 过期。
+        'Cache-Control': 'no-store',
+      },
     });
   }
 
@@ -240,13 +244,14 @@ function hash(str) {
   return Math.abs(h).toString(36);
 }
 
-if (typeof addEventListener !== 'undefined') {
-  addEventListener('fetch', (event) => {
-    event.respondWith(handleRequest(event.request, event.env));
-  });
-}
+// ES Module 格式：只有这种写法能通过 env 拿到 wrangler secret（GITHUB_TOKEN）。
+// 旧的 Service Worker 写法（addEventListener + event.env）拿不到 env，
+// 会导致请求始终按匿名调用 GitHub API，60 次/小时打满后全部 403。
+export default {
+  async fetch(request, env) {
+    return handleRequest(request, env);
+  },
+};
 
-// 供本地单元测试复用内部纯函数；同一份源码两种运行方式。
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, rfc3339, buildAtom, parseOfficialAtom, tagFromEntry, unescapeXml };
-}
+// 供本地单元测试复用内部纯函数。
+export { esc, rfc3339, buildAtom, parseOfficialAtom, tagFromEntry, unescapeXml };

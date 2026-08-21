@@ -2,6 +2,7 @@
   "name": "github-release-atom",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "Cloudflare Worker：把 GitHub Releases 过滤掉 prerelease 后输出标准 Atom feed",
   "scripts": {
     "dev": "wrangler dev",
