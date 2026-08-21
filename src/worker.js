@@ -105,7 +105,9 @@ async function fetchPrereleaseMap(repo, token) {
     'X-GitHub-Api-Version': '2022-11-28',
   };
   if (token) headers.Authorization = `Bearer ${token}`;
-  for (let page = 1; page <= 3; page++) {
+  // 官方 releases.atom 只返回最新 10 条，REST 第一页（100 条）必然覆盖，
+  // 因此只拉 1 页即可，既省限流又降延迟。
+  for (let page = 1; page <= 1; page++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 15000);
     try {
